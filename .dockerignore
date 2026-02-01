@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+.DS_Store
+README.md
+debug_*.html
+debug_page.py
+deploy.sh

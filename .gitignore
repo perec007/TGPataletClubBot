@@ -1,0 +1,10 @@
+.env
+__pycache__/
+debug_*.html
+*.pyc
+*.pyo
+venv/
+.venv/
+*.log
+.DS_Store
+cache/
