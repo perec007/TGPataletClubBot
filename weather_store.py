@@ -28,6 +28,7 @@ def _count_params(data: WeatherData) -> int:
             data.wind_gusts,
             data.wind_direction,
             data.precipitation,
+            data.humidity,
             data.battery,
         )
         if v is not None
@@ -48,6 +49,7 @@ def add(data: WeatherData) -> None:
         "wind_gusts": data.wind_gusts,
         "wind_direction": data.wind_direction,
         "precipitation": data.precipitation,
+        "humidity": data.humidity,
         "battery": data.battery,
     }
     _store.append(record)
@@ -56,6 +58,15 @@ def add(data: WeatherData) -> None:
 def get_last_hour() -> list[dict[str, Any]]:
     """Список записей за последний час (от старых к новым)."""
     return list(_store)
+
+
+def get_last_minutes(minutes: int) -> list[dict[str, Any]]:
+    """Список записей за последние N минут (от старых к новым)."""
+    if not _store:
+        return []
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - (minutes * 60)
+    return [r for r in _store if r["ts"].timestamp() >= cutoff]
 
 
 def get_last_record() -> Optional[dict[str, Any]]:

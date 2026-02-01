@@ -30,6 +30,16 @@ MONITOR_PASSWORD = get_str("MONITOR_PASSWORD")
 TELEGRAM_BOT_TOKEN = get_str("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = get_str("TELEGRAM_CHANNEL_ID")
 
+# Список ID администраторов через запятую. Только они могут использовать /check и /status.
+# Если пусто — команды доступны всем.
+ADMIN_IDS_RAW = get_str("ADMIN_IDS", "")
+ADMIN_IDS: set[int] = set()
+if ADMIN_IDS_RAW:
+    for part in ADMIN_IDS_RAW.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+            ADMIN_IDS.add(int(part))
+
 # Ссылка на сообщение для редактирования вместо отправки нового.
 # Формат: https://t.me/c/1234567890/123 (приватный канал) или t.me/c/1234567890/123
 # Если задано — бот будет редактировать это сообщение при каждой публикации.
@@ -73,6 +83,24 @@ def parse_message_link(link: str) -> Optional[tuple[int | str, int]]:
             return (f"@{username}", int(m.group(2)))
 
     return None
+
+
+def parse_message_links(raw: str) -> list[tuple[int | str, int]]:
+    """
+    Парсит несколько ссылок на сообщения Telegram.
+    Ссылки разделяются запятой, переносом строки или пробелом.
+    Возвращает список (chat_id, message_id) для всех распознанных ссылок.
+    """
+    if not raw or not raw.strip():
+        return []
+    # Разделяем по запятой, переносу строки или нескольким пробелам
+    parts = re.split(r"[,\n]+", raw)
+    results = []
+    for part in parts:
+        parsed = parse_message_link(part.strip())
+        if parsed:
+            results.append(parsed)
+    return results
 
 # Режим парсинга: playwright (JS) или requests (HTML)
 USE_PLAYWRIGHT = get_str("USE_PLAYWRIGHT", "true").lower() in ("true", "1", "yes")

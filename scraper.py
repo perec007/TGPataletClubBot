@@ -31,22 +31,25 @@ class WeatherData:
     wind_gusts: Optional[float] = None       # м/с (порывы)
     wind_direction: Optional[float] = None   # градусы
     precipitation: Optional[float] = None    # мм
-    battery: Optional[float] = None          # %
+    humidity: Optional[float] = None         # %
+    battery: Optional[float] = None          # Вольт (В)
     raw_text: str = ""
     timestamp: Optional[str] = None
 
     def to_text(self) -> str:
         """Форматирование данных для вывода в Telegram."""
-        lines = ["📊 **Текущее состояние погоды**\n"]
-        lines.append("Показания с метеостанции:")
+        lines = ["📊 **Показания метеостанции аэродрома Паралёт:**"]
         if self.temperature is not None:
             lines.append(f"🌡 Температура: {self.temperature} °C")
         if self.wind_speed is not None:
-            lines.append(f"💨 Скорость ветра: {self.wind_speed} м/с")
-        if self.wind_gusts is not None:
-            lines.append(f"🌀 Порывы ветра: {self.wind_gusts} м/с")
+            wind_str = f"💨 Скорость ветра: {self.wind_speed} м/с"
+            if self.wind_gusts is not None:
+                wind_str += f" ({self.wind_gusts} м/с)"
+            lines.append(wind_str)
         if self.wind_direction is not None:
             lines.append(f"🧭 Направление ветра: {format_wind_direction(self.wind_direction)}")
+        if self.humidity is not None:
+            lines.append(f"💧 Влажность: {self.humidity}%")
         if self.precipitation is not None:
             lines.append(f"🌧 Осадки: {self.precipitation} мм")
         return "\n".join(lines)
@@ -64,6 +67,8 @@ class WeatherData:
             series["wind_direction"] = [self.wind_direction]
         if self.precipitation is not None:
             series["precipitation"] = [self.precipitation]
+        if self.humidity is not None:
+            series["humidity"] = [self.humidity]
         if self.battery is not None:
             series["battery"] = [self.battery]
         return series
@@ -133,6 +138,8 @@ LABEL_MAP = {
     "осадки": "precipitation",
     "precip": "precipitation",
     "дождь": "precipitation",
+    "влажность": "humidity",
+    "humidity": "humidity",
     "батарея": "battery",
     "аккумулятор": "battery",
     "battery": "battery",
@@ -365,9 +372,10 @@ class MonitoringScraper:
         """
         data = WeatherData(raw_text="")
         # Строгие селекторы по структуре страницы (см. скриншот и debug_after_login.html)
-        # Температура: первый дочерний span #data_TH (воздух), не точка росы (третий span)
+        # Температура: первый дочерний span #data_TH (воздух), влажность — второй, точка росы — третий
         fields = [
             ("temperature", "#data_TH > span:first-child"),
+            ("humidity", "#data_TH > span:nth-child(2)"),
             ("wind_speed", "#data_W span.wind-speed"),
             ("wind_gusts", "#data_W span.wind-strong"),
             ("wind_direction", "#actualChart_WD span.wind-direction"),
@@ -429,6 +437,7 @@ class MonitoringScraper:
             "wind_gusts": data.wind_gusts,
             "wind_direction": data.wind_direction,
             "precipitation": data.precipitation,
+            "humidity": data.humidity,
             "battery": data.battery,
             "raw_text": data.raw_text,
             "timestamp": data.timestamp,
@@ -442,6 +451,7 @@ class MonitoringScraper:
             wind_gusts=d.get("wind_gusts"),
             wind_direction=d.get("wind_direction"),
             precipitation=d.get("precipitation"),
+            humidity=d.get("humidity"),
             battery=d.get("battery"),
             raw_text=d.get("raw_text", ""),
             timestamp=d.get("timestamp"),
