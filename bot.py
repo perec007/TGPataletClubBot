@@ -19,7 +19,6 @@ from config import (
     UPDATE_INTERVAL_SECONDS,
     ADMIN_IDS,
     format_datetime_local,
-    parse_message_link,
     parse_message_links,
 )
 from cache import get_cache_info
@@ -114,7 +113,7 @@ def _generate_wind_rose_bytes() -> Optional[bytes]:
         if not records:
             return None
         bg_path = get_default_background_path()
-        return generate_wind_rose_png(records, bg_path, title="Скорость и порывы ветра (10 мин)")
+        return generate_wind_rose_png(records, bg_path)
     except Exception as e:
         logger.debug("Роза ветра не построена: %s", e)
         return None

@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Код приложения и фон для розы ветра
-COPY config.py scraper.py graph_generator.py weather_store.py wind_rose.py bot.py main.py cache.py ./
+COPY config.py scraper.py weather_store.py wind_rose.py bot.py main.py cache.py ./
 COPY assets/ ./assets/
 
 CMD ["python", "main.py"]

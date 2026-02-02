@@ -9,32 +9,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import matplotlib
-# Бэкенд mplcairo поддерживает цветные шрифты (эмодзи) через Raqm
 matplotlib.use("module://mplcairo.base")
-import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
-
-# Регистрируем Noto Color Emoji по пути (matplotlib не находит по имени без этого)
-_EMOJI_FONT_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-]
-_emoji_font_name = None
-for _path in _EMOJI_FONT_PATHS:
-    if os.path.isfile(_path):
-        try:
-            fm.fontManager.addfont(_path)
-            _emoji_font_name = fm.FontProperties(fname=_path).get_name()
-            break
-        except Exception:
-            pass
-
-if _emoji_font_name:
-    matplotlib.rcParams["font.family"] = ["DejaVu Sans", _emoji_font_name, "DejaVu Sans"]
-else:
-    matplotlib.rcParams["font.family"] = ["DejaVu Sans"]
 import numpy as np
-from matplotlib.patches import FancyBboxPatch, Patch, Rectangle
+from matplotlib.patches import FancyBboxPatch, Rectangle
 from PIL import Image
 
 from config import format_datetime_local
@@ -80,19 +58,6 @@ def _aggregate_by_sector(records: list[dict[str, Any]]) -> tuple[list[float], li
 _LEGEND_TEMP = "●"   # температура
 
 
-def _build_combined_stats(records: list[dict[str, Any]], label_speed: str, label_gusts: str) -> str:
-    """Формирует одну строку: температура, скорость и порывы."""
-    if not records:
-        return ""
-    last = records[-1]
-    parts = []
-    if last.get("temperature") is not None:
-        parts.append(f"{_LEGEND_TEMP} Темп.: {last['temperature']} °C")
-    parts.append(label_speed)
-    parts.append(label_gusts)
-    return "  ·  ".join(parts)
-
-
 # Стиль: тёмные панели, читаемые на любом фоне
 _BOX_FACE = "#1e2a3a"
 _BOX_EDGE = "#3d5a80"
@@ -109,11 +74,7 @@ _COLOR_GUST = "#e74c3c"
 _COLOR_GUST_EDGE = "#c0392b"
 
 
-def generate_wind_rose_png(
-    records: list[dict[str, Any]],
-    background_path: str,
-    title: str = "Скорость и порывы ветра (10 мин)",
-) -> bytes:
+def generate_wind_rose_png(records: list[dict[str, Any]], background_path: str) -> bytes:
     """
     Строит одну розу: скорость ветра (синие столбцы) и порывы (красные) по направлениям.
     Добавляет подпись (заголовок) и легенду с температурой, ветром и порывами (текущие и мин/макс).
