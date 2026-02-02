@@ -2,13 +2,14 @@
 Telegram-бот для публикации данных мониторинга погоды в канал и команды /check.
 """
 import asyncio
+import io
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from telegram import Bot, Update
+from telegram import Bot, Update, InputMediaPhoto
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import (
@@ -24,6 +25,7 @@ from config import (
 from cache import get_cache_info
 from scraper import MonitoringScraper, WeatherData, format_wind_direction
 from weather_store import add as store_add, get_last_hour as store_get_last_hour, get_last_minutes as store_get_last_minutes, get_last_success_info as store_get_last_success
+from wind_rose import generate_wind_rose_png, get_default_background_path
 
 logger = logging.getLogger(__name__)
 
@@ -91,20 +93,8 @@ def _fetch_weather_sync() -> WeatherData:
     return scraper.fetch_weather()
 
 
-async def send_weather_to_chat(
-    chat_id: int | str,
-    data: Optional[WeatherData] = None,
-    bot: Optional[Bot] = None,
-) -> bool:
-    """Отправить погоду (текст + график) в указанный чат. Возвращает True при успехе."""
-    if data is None:
-        # Скрейп синхронный и может долго выполняться — запускаем в потоке
-        try:
-            data = await asyncio.to_thread(_fetch_weather_sync)
-        except Exception as e:
-            logger.exception("Ошибка скрейпа при /check: %s", e)
-            return False
-    store_add(data)
+def _build_weather_message_text(data: WeatherData) -> str:
+    """Собирает полный текст сообщения с показаниями станции (без даты обновления)."""
     text = data.to_text()
     has_data = any([data.temperature, data.wind_speed, data.wind_gusts, data.wind_direction, data.precipitation, data.humidity, data.battery])
     if not has_data:
@@ -114,12 +104,54 @@ async def send_weather_to_chat(
     text += _get_10min_stats(records_10min)
     text += _get_hourly_stats(records_hour)
     text += _get_battery_line(records_hour)
-    text = _append_update_date(text)
+    return _append_update_date(text)
+
+
+def _generate_wind_rose_bytes() -> Optional[bytes]:
+    """Генерирует PNG розы ветра за последние 10 минут. При ошибке возвращает None."""
+    try:
+        records = store_get_last_minutes(10)
+        if not records:
+            return None
+        bg_path = get_default_background_path()
+        return generate_wind_rose_png(records, bg_path, title="Скорость и порывы ветра (10 мин)")
+    except Exception as e:
+        logger.debug("Роза ветра не построена: %s", e)
+        return None
+
+
+async def send_weather_to_chat(
+    chat_id: int | str,
+    data: Optional[WeatherData] = None,
+    bot: Optional[Bot] = None,
+) -> bool:
+    """Отправить погоду (текст + роза ветра) в указанный чат. Возвращает True при успехе."""
+    if data is None:
+        try:
+            data = await asyncio.to_thread(_fetch_weather_sync)
+        except Exception as e:
+            logger.exception("Ошибка скрейпа при /check: %s", e)
+            return False
+    store_add(data)
+    text = _build_weather_message_text(data)
     token = TELEGRAM_BOT_TOKEN
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN не задан")
         return False
     b = bot or Bot(token=token)
+    # Пытаемся отправить с изображением розы ветра (caption = текст показаний)
+    wind_rose_bytes = await asyncio.to_thread(_generate_wind_rose_bytes)
+    if wind_rose_bytes and len(text) <= 1024:
+        try:
+            await b.send_photo(
+                chat_id=chat_id,
+                photo=io.BytesIO(wind_rose_bytes),
+                caption=text,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return True
+        except TelegramError as e:
+            logger.warning("Отправка с фото не удалась (%s), отправляю только текст", e)
     try:
         await b.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
         return True
@@ -136,6 +168,34 @@ def _format_weather_line(label: str, value, unit: str) -> str:
     if value is None:
         return f"{label}: —"
     return f"{label}: {value} {unit}"
+
+
+def _help_text() -> str:
+    """Текст справки по командам и правам доступа."""
+    who = "только администраторы (ADMIN_IDS)" if ADMIN_IDS else "все пользователи"
+    return (
+        "📋 **Команды бота**\n\n"
+        "/check — принудительный опрос метеостанции и вывод погоды в чат.\n"
+        f"Кто может вызывать: {who}.\n\n"
+        "/status — дата последнего скрейпа, кеш, текущая погода и мин/макс ветра за час.\n"
+        f"Кто может вызывать: {who}.\n\n"
+        "/wind — роза скорости ветра за последние 10 минут на фоне карты аэродрома Паралёт.\n"
+        f"Кто может вызывать: {who}.\n\n"
+        "/help — эта справка.\n"
+        "Кто может вызывать: все пользователи."
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /help — описание команд и прав доступа."""
+    if not update.effective_chat:
+        return
+    msg = update.effective_message
+    text = _help_text()
+    try:
+        await (msg.reply_text(text, parse_mode=ParseMode.MARKDOWN) if msg else context.bot.send_message(update.effective_chat.id, text, parse_mode=ParseMode.MARKDOWN))
+    except TelegramError as e:
+        logger.exception("Ошибка отправки /help: %s", e)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -193,6 +253,43 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await (msg.reply_text(text, parse_mode=ParseMode.MARKDOWN) if msg else context.bot.send_message(update.effective_chat.id, text, parse_mode=ParseMode.MARKDOWN))
     except TelegramError as e:
         logger.exception("Ошибка отправки /status: %s", e)
+
+
+async def wind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /wind — роза ветра за последние 10 минут на фоне карты."""
+    if not update.effective_chat:
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    if not is_admin(user_id):
+        logger.info("Пользователь %s не админ — /wind отклонено", user_id)
+        return
+    chat_id = update.effective_chat.id
+    msg = update.effective_message
+    try:
+        records = store_get_last_minutes(10)
+        if not records:
+            text = "Нет данных за последние 10 минут. Выполните /check для опроса метеостанции."
+            await (msg.reply_text(text) if msg else context.bot.send_message(chat_id, text))
+            return
+        bg_path = get_default_background_path()
+        png_bytes = await asyncio.to_thread(
+            generate_wind_rose_png,
+            records,
+            bg_path,
+            title="Скорость и порывы ветра (10 мин)",
+        )
+        await context.bot.send_photo(chat_id, photo=io.BytesIO(png_bytes), caption="💨 Роза скорости и порывов ветра за 10 мин. Паралёт.")
+    except (ValueError, FileNotFoundError) as e:
+        logger.warning("Роза ветра: %s", e)
+        text = f"Не удалось построить розу ветра: {e}"
+        await (msg.reply_text(text) if msg else context.bot.send_message(chat_id, text))
+    except Exception as e:
+        logger.exception("Ошибка /wind: %s", e)
+        if msg:
+            try:
+                await msg.reply_text(f"Ошибка: {e!s}")
+            except TelegramError:
+                pass
 
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -265,30 +362,43 @@ async def publish_weather_to_channel(
         return True
 
     bot = Bot(token=bot_token)
+    text = _build_weather_message_text(data)
+    wind_rose_bytes = await asyncio.to_thread(_generate_wind_rose_bytes)
 
-    # Текстовое сообщение + статистика за 10 мин + час + батарея + дата обновления внизу
-    text = data.to_text()
-    has_data = any([data.temperature, data.wind_speed, data.wind_gusts, data.wind_direction, data.precipitation, data.humidity, data.battery])
-    if not has_data:
-        text += "\n⚠️ Данные не получены. Проверьте доступность страницы и селекторы парсера."
-    records_hour = store_get_last_hour()
-    records_10min = store_get_last_minutes(10)
-    text += _get_10min_stats(records_10min)
-    text += _get_hourly_stats(records_hour)
-    text += _get_battery_line(records_hour)
-    text = _append_update_date(text)
-
-    # Редактируем все сообщения из списка
     success = True
     for chat_id_edit, message_id in edit_targets:
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id_edit,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            logger.info("Сообщение отредактировано: chat_id=%s, message_id=%s", chat_id_edit, message_id)
+            if wind_rose_bytes and len(text) <= 1024:
+                try:
+                    await bot.edit_message_media(
+                        chat_id=chat_id_edit,
+                        message_id=message_id,
+                        media=InputMediaPhoto(media=io.BytesIO(wind_rose_bytes), caption=text, parse_mode=ParseMode.MARKDOWN),
+                    )
+                    logger.info("Сообщение отредактировано (фото+подпись): chat_id=%s, message_id=%s", chat_id_edit, message_id)
+                    continue
+                except TelegramError as media_err:
+                    logger.debug("Редактирование медиа не удалось (%s), пробуем текст или подпись", media_err)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id_edit,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info("Сообщение отредактировано (текст): chat_id=%s, message_id=%s", chat_id_edit, message_id)
+            except BadRequest as text_err:
+                if "no text in the message to edit" in str(text_err).lower() or "message to edit not found" in str(text_err).lower():
+                    # Сообщение — фото/медиа, редактируем только подпись
+                    await bot.edit_message_caption(
+                        chat_id=chat_id_edit,
+                        message_id=message_id,
+                        caption=text,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    logger.info("Сообщение отредактировано (подпись): chat_id=%s, message_id=%s", chat_id_edit, message_id)
+                else:
+                    raise
         except TelegramError as e:
             logger.exception("Ошибка редактирования сообщения chat_id=%s, message_id=%s: %s", chat_id_edit, message_id, e)
             success = False
@@ -308,14 +418,16 @@ def run_bot(poll_interval_seconds: int | None = None) -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN не задан в .env")
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("wind", wind_cmd))
     edit_targets_startup = parse_message_links(MESSAGE_TO_EDIT)
     has_channel_or_edit = TELEGRAM_CHANNEL_ID or edit_targets_startup
     if MESSAGE_TO_EDIT:
         logger.info("MESSAGE_TO_EDIT=%r -> parsed %d link(s): %s", MESSAGE_TO_EDIT, len(edit_targets_startup), edit_targets_startup)
     if ADMIN_IDS:
-        logger.info("ADMIN_IDS: %s (команды /check и /status только для них)", ADMIN_IDS)
+        logger.info("ADMIN_IDS: %s (команды /check, /status, /wind только для них)", ADMIN_IDS)
     else:
         logger.info("ADMIN_IDS не задан — команды /check и /status доступны всем")
     interval = poll_interval_seconds if poll_interval_seconds is not None else UPDATE_INTERVAL_SECONDS
