@@ -152,8 +152,11 @@ def generate_wind_rose_png(records: list[dict[str, Any]], background_path: str) 
     temp_str = f"{_LEGEND_TEMP} Темп.: {last['temperature']} °C" if last.get("temperature") is not None else None
     _x_left = 0.07
     _sq_size = 0.022
+    _sq_height = _sq_size * 0.85
     _gap = 0.012
     _x_text_after_sq = _x_left + _sq_size + _gap
+    # Смещение квадрата вверх, чтобы выровнять по центру с текстом (va="bottom" → середина строки ~ y + 0.01)
+    _sq_y_offset = 0.01 - _sq_height / 2
     _line_height = 0.042
     _y1 = 0.118 + 0.10
     _y2 = _y1 - _line_height
@@ -170,11 +173,11 @@ def generate_wind_rose_png(records: list[dict[str, Any]], background_path: str) 
     if temp_str:
         fig.text(_x_left, _y1, temp_str, ha="left", va="bottom", fontsize=20, color=_TEXT_COLOR, weight="bold",
                  family="sans-serif")
-    fig.add_artist(Rectangle((_x_left, _y2 - 0.01), _sq_size, _sq_size * 0.85,
+    fig.add_artist(Rectangle((_x_left, _y2 + _sq_y_offset), _sq_size, _sq_height,
                              facecolor=_COLOR_SPEED, edgecolor=_COLOR_SPEED_EDGE, linewidth=0.8, transform=fig.transFigure))
     fig.text(_x_text_after_sq, _y2, label_speed, ha="left", va="bottom", fontsize=20, color=_TEXT_COLOR, weight="bold",
              family="sans-serif")
-    fig.add_artist(Rectangle((_x_left, _y3 - 0.01), _sq_size, _sq_size * 0.85,
+    fig.add_artist(Rectangle((_x_left, _y3 + _sq_y_offset), _sq_size, _sq_height,
                              facecolor=_COLOR_GUST, edgecolor=_COLOR_GUST_EDGE, linewidth=0.8, transform=fig.transFigure))
     fig.text(_x_text_after_sq, _y3, label_gusts, ha="left", va="bottom", fontsize=20, color=_TEXT_COLOR, weight="bold",
              family="sans-serif")

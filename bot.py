@@ -17,6 +17,7 @@ from config import (
     TELEGRAM_CHANNEL_ID,
     MESSAGE_TO_EDIT,
     UPDATE_INTERVAL_SECONDS,
+    REPLY_DELETE_AFTER_SECONDS,
     ADMIN_IDS,
     format_datetime_local,
     parse_message_links,
@@ -27,6 +28,31 @@ from weather_store import add as store_add, get_last_hour as store_get_last_hour
 from wind_rose import generate_wind_rose_png, get_default_background_path
 
 logger = logging.getLogger(__name__)
+
+
+async def _delete_user_message(message) -> None:
+    """Удаляет сообщение пользователя (вызов команды). Ошибки игнорируем."""
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except TelegramError:
+        pass
+
+
+async def _job_delete_reply(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаляет сообщение бота по (chat_id, message_id) из job.data."""
+    chat_id, message_id = context.job.data
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramError:
+        pass
+
+
+def _schedule_delete_reply(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> None:
+    """Планирует удаление ответа бота через REPLY_DELETE_AFTER_SECONDS."""
+    if REPLY_DELETE_AFTER_SECONDS > 0 and context.job_queue:
+        context.job_queue.run_once(_job_delete_reply, when=REPLY_DELETE_AFTER_SECONDS, data=(chat_id, message_id))
 
 
 def is_admin(user_id: int | None) -> bool:
@@ -123,43 +149,42 @@ async def send_weather_to_chat(
     chat_id: int | str,
     data: Optional[WeatherData] = None,
     bot: Optional[Bot] = None,
-) -> bool:
-    """Отправить погоду (текст + роза ветра) в указанный чат. Возвращает True при успехе."""
+) -> tuple[bool, Optional[int]]:
+    """Отправить погоду (текст + роза ветра) в указанный чат. Возвращает (успех, message_id ответа)."""
     if data is None:
         try:
             data = await asyncio.to_thread(_fetch_weather_sync)
         except Exception as e:
             logger.exception("Ошибка скрейпа при /check: %s", e)
-            return False
+            return (False, None)
     store_add(data)
     text = _build_weather_message_text(data)
     token = TELEGRAM_BOT_TOKEN
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN не задан")
-        return False
+        return (False, None)
     b = bot or Bot(token=token)
-    # Пытаемся отправить с изображением розы ветра (caption = текст показаний)
     wind_rose_bytes = await asyncio.to_thread(_generate_wind_rose_bytes)
     if wind_rose_bytes and len(text) <= 1024:
         try:
-            await b.send_photo(
+            sent = await b.send_photo(
                 chat_id=chat_id,
                 photo=io.BytesIO(wind_rose_bytes),
                 caption=text,
                 parse_mode=ParseMode.MARKDOWN,
             )
-            return True
+            return (True, sent.message_id)
         except TelegramError as e:
             logger.warning("Отправка с фото не удалась (%s), отправляю только текст", e)
     try:
-        await b.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
-        return True
+        sent = await b.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+        return (True, sent.message_id)
     except TelegramError as e:
         logger.exception("Ошибка отправки в чат %s: %s", chat_id, e)
-        return False
+        return (False, None)
     except Exception as e:
         logger.exception("Ошибка при отправке погоды в чат %s: %s", chat_id, e)
-        return False
+        return (False, None)
 
 
 def _format_weather_line(label: str, value, unit: str) -> str:
@@ -189,10 +214,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help — описание команд и прав доступа."""
     if not update.effective_chat:
         return
+    chat_id = update.effective_chat.id
     msg = update.effective_message
+    if REPLY_DELETE_AFTER_SECONDS > 0:
+        await _delete_user_message(msg)
     text = _help_text()
     try:
-        await (msg.reply_text(text, parse_mode=ParseMode.MARKDOWN) if msg else context.bot.send_message(update.effective_chat.id, text, parse_mode=ParseMode.MARKDOWN))
+        sent = await context.bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+        _schedule_delete_reply(context, chat_id, sent.message_id)
     except TelegramError as e:
         logger.exception("Ошибка отправки /help: %s", e)
 
@@ -248,8 +277,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         hourly = _get_hourly_stats(records)
         if hourly:
             text += hourly
+    chat_id = update.effective_chat.id
+    if REPLY_DELETE_AFTER_SECONDS > 0:
+        await _delete_user_message(msg)
     try:
-        await (msg.reply_text(text, parse_mode=ParseMode.MARKDOWN) if msg else context.bot.send_message(update.effective_chat.id, text, parse_mode=ParseMode.MARKDOWN))
+        sent = await context.bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+        _schedule_delete_reply(context, chat_id, sent.message_id)
     except TelegramError as e:
         logger.exception("Ошибка отправки /status: %s", e)
 
@@ -264,31 +297,31 @@ async def wind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     msg = update.effective_message
+    if REPLY_DELETE_AFTER_SECONDS > 0:
+        await _delete_user_message(msg)
     try:
         records = store_get_last_minutes(10)
         if not records:
             text = "Нет данных за последние 10 минут. Выполните /check для опроса метеостанции."
-            await (msg.reply_text(text) if msg else context.bot.send_message(chat_id, text))
+            sent = await context.bot.send_message(chat_id, text)
+            _schedule_delete_reply(context, chat_id, sent.message_id)
             return
         bg_path = get_default_background_path()
-        png_bytes = await asyncio.to_thread(
-            generate_wind_rose_png,
-            records,
-            bg_path,
-            title="Скорость и порывы ветра (10 мин)",
-        )
-        await context.bot.send_photo(chat_id, photo=io.BytesIO(png_bytes), caption="💨 Роза скорости и порывов ветра за 10 мин. Паралёт.")
+        png_bytes = await asyncio.to_thread(generate_wind_rose_png, records, bg_path)
+        sent = await context.bot.send_photo(chat_id, photo=io.BytesIO(png_bytes), caption="💨 Роза скорости и порывов ветра за 10 мин. Паралёт.")
+        _schedule_delete_reply(context, chat_id, sent.message_id)
     except (ValueError, FileNotFoundError) as e:
         logger.warning("Роза ветра: %s", e)
         text = f"Не удалось построить розу ветра: {e}"
-        await (msg.reply_text(text) if msg else context.bot.send_message(chat_id, text))
+        sent = await context.bot.send_message(chat_id, text)
+        _schedule_delete_reply(context, chat_id, sent.message_id)
     except Exception as e:
         logger.exception("Ошибка /wind: %s", e)
-        if msg:
-            try:
-                await msg.reply_text(f"Ошибка: {e!s}")
-            except TelegramError:
-                pass
+        try:
+            sent = await context.bot.send_message(chat_id, f"Ошибка: {e!s}")
+            _schedule_delete_reply(context, chat_id, sent.message_id)
+        except TelegramError:
+            pass
 
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,21 +334,27 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     msg = update.effective_message
+    if REPLY_DELETE_AFTER_SECONDS > 0:
+        await _delete_user_message(msg)
     try:
-        await (msg.reply_text("Запрашиваю данные с метеостанции...") if msg else context.bot.send_message(chat_id, "Запрашиваю данные с метеостанции..."))
+        sent = await context.bot.send_message(chat_id, "Запрашиваю данные с метеостанции...")
+        _schedule_delete_reply(context, chat_id, sent.message_id)
     except TelegramError:
         pass
     try:
-        ok = await send_weather_to_chat(chat_id, bot=context.bot)
-        if not ok and msg:
-            await msg.reply_text("Не удалось получить или отправить данные.")
+        ok, reply_message_id = await send_weather_to_chat(chat_id, bot=context.bot)
+        if reply_message_id is not None:
+            _schedule_delete_reply(context, chat_id, reply_message_id)
+        if not ok:
+            err = await context.bot.send_message(chat_id, "Не удалось получить или отправить данные.")
+            _schedule_delete_reply(context, chat_id, err.message_id)
     except Exception as e:
         logger.exception("Ошибка в /check: %s", e)
-        if msg:
-            try:
-                await msg.reply_text(f"Ошибка: {e!s}")
-            except TelegramError:
-                pass
+        try:
+            sent = await context.bot.send_message(chat_id, f"Ошибка: {e!s}")
+            _schedule_delete_reply(context, chat_id, sent.message_id)
+        except TelegramError:
+            pass
 
 
 async def publish_weather_to_channel(

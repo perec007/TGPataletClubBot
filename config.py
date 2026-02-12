@@ -48,6 +48,9 @@ MESSAGE_TO_EDIT = get_str("MESSAGE_TO_EDIT")
 # Частота обновления «📊 Текущее состояние погоды» (в секундах). По умолчанию 60.
 UPDATE_INTERVAL_SECONDS = max(10, get_int("UPDATE_INTERVAL_SECONDS", 60))
 
+# Через сколько секунд удалять в чате сообщение пользователя (команду) и ответ бота. 0 = не удалять.
+REPLY_DELETE_AFTER_SECONDS = max(0, get_int("REPLY_DELETE_AFTER_SECONDS", 10))
+
 
 def parse_message_link(link: str) -> Optional[tuple[int | str, int]]:
     """
